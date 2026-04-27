@@ -1,0 +1,25 @@
+data:
+  raw_path: "data/raw/hour.csv"
+  processed_path: "data/processed/clean.csv"
+  train_year: 2011
+  live_year: 2012
+  test_size: 0.2
+  random_state: 42
+
+model:
+  random_state: 42
+  n_estimators: 100
+  save_path: "models/model.pkl"
+  metrics_path: "models/metrics.json"
+
+features:
+  target: "cnt"
+  drop_cols: ["instant", "dteday", "casual", "registered"]
+
+drift:
+  window_size: 100
+  p_value_threshold: 0.05
+  log_path: "logs/drift_log.jsonl"
+
+simulation:
+  requests_per_second: 10
