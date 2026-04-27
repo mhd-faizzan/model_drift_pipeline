@@ -9,12 +9,13 @@ dist/
 wheels/
 *.egg-info
 
-# data and models — too large for git
+# data and models 
 data/raw/
 data/processed/
 models/*.pkl
+models/*.json
 
-# logs — generated at runtime
+# logs
 logs/
 
 # jupyter
