@@ -14,7 +14,7 @@ model:
 
 features:
   target: "cnt"
-  drop_cols: ["instant", "dteday", "casual", "registered"]
+  drop_cols: ["instant", "dteday", "casual", "registered", "yr"]
 
 drift:
   window_size: 100

@@ -1,4 +1,7 @@
-# Python-generated files
+# virtual environment
+.venv/
+
+# python cache
 __pycache__/
 *.py[oc]
 build/
@@ -6,5 +9,22 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
-.venv
+# data and models — too large for git
+data/raw/
+data/processed/
+models/*.pkl
+
+# logs — generated at runtime
+logs/
+
+# jupyter
+.ipynb_checkpoints/
+
+# system
+.DS_Store
+
+# secrets
+.env
+
+# experiment tracking
+mlruns/
