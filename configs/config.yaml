@@ -9,8 +9,10 @@ data:
 model:
   random_state: 42
   n_estimators: 100
+  n_jobs: -1
   save_path: "models/model.pkl"
   metrics_path: "models/metrics.json"
+  champion_metrics_path: "models/champion_metrics.json"
 
 features:
   target: "cnt"
@@ -19,7 +21,10 @@ features:
 drift:
   window_size: 100
   p_value_threshold: 0.05
+  min_drift_features: 2
   log_path: "logs/drift_log.jsonl"
+  report_path: "logs/drift_report.jsonl"
 
 simulation:
   requests_per_second: 10
+  total_requests: 200
