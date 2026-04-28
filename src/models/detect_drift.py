@@ -61,27 +61,38 @@ def load_live_window(config: dict) -> pd.DataFrame:
     records = [json.loads(line) for line in recent_lines]
     df = pd.DataFrame(records)
 
-    # drop prediction column — we only compare features
+    # drop prediction column — only compare features
     if "prediction" in df.columns:
         df = df.drop(columns=["prediction"])
 
     return df
 
 
-def run_ks_test(train_df: pd.DataFrame, live_df: pd.DataFrame, threshold: float) -> dict:
+def run_ks_test(
+    train_df: pd.DataFrame,
+    live_df: pd.DataFrame,
+    config: dict
+) -> dict:
     """
     Runs KS test on each feature comparing training vs live distribution.
+    Drift is flagged only if the number of drifted features meets
+    the min_drift_features threshold from config.
 
     Args:
         train_df: Training feature dataframe
         live_df: Live request feature dataframe
-        threshold: p-value threshold below which drift is flagged
+        config: Full project config dict
 
     Returns:
-        Dict with per-feature results and overall drift flag
+        Dict with per-feature results, drifted feature list, and overall drift flag
     """
+    threshold = config["drift"]["p_value_threshold"]
+
+    # default to 1 if not set — matches original behaviour
+    min_drift_features = config["drift"].get("min_drift_features", 1)
+
     results = {}
-    drift_detected = False
+    drifted_features = []
 
     for col in live_df.columns:
         if col not in train_df.columns:
@@ -95,7 +106,16 @@ def run_ks_test(train_df: pd.DataFrame, live_df: pd.DataFrame, threshold: float)
         drifted = bool(p_value < threshold)
 
         if drifted:
-            drift_detected = True
+            drifted_features.append(col)
+            logger.warning(
+                "Drift detected in '%s' — ks_stat: %.4f  p_value: %.4f",
+                col, ks_stat, p_value
+            )
+        else:
+            logger.info(
+                "No drift in '%s' — ks_stat: %.4f  p_value: %.4f",
+                col, ks_stat, p_value
+            )
 
         results[col] = {
             "ks_statistic": round(float(ks_stat), 4),
@@ -103,33 +123,48 @@ def run_ks_test(train_df: pd.DataFrame, live_df: pd.DataFrame, threshold: float)
             "drifted": drifted
         }
 
-        if drifted:
-            logger.warning(
-                "Drift detected in '%s' — p_value: %.4f", col, p_value
-            )
-        else:
-            logger.info("No drift in '%s' — p_value: %.4f", col, p_value)
+    # only flag overall drift if enough features drifted
+    drift_detected = len(drifted_features) >= min_drift_features
+
+    if drift_detected:
+        logger.warning(
+            "%d feature(s) drifted (threshold: %d) — retraining should be triggered",
+            len(drifted_features), min_drift_features
+        )
+    else:
+        logger.info(
+            "%d feature(s) drifted (threshold: %d) — model is healthy",
+            len(drifted_features), min_drift_features
+        )
 
     return {
         "drift_detected": bool(drift_detected),
-        "features": results
+        "drifted_features": drifted_features,
+        "features": results,
     }
 
 
 def save_drift_report(report: dict, config: dict) -> None:
     """
-    Appends drift report to drift log file.
+    Writes the latest drift report to report_path (overwrite)
+    and appends to log_path (full history).
 
     Args:
         report: Drift report dict
         config: Full project config dict
     """
     os.makedirs("logs", exist_ok=True)
-    report_path = "logs/drift_report.jsonl"
 
-    with open(report_path, "a") as f:
+    # append to running log — full history
+    log_path = config["drift"]["log_path"]
+    with open(log_path, "a") as f:
         f.write(json.dumps(report) + "\n")
+    logger.info("Drift log updated at %s", log_path)
 
+    # overwrite latest report — this is what the PR body reads
+    report_path = config["drift"]["report_path"]
+    with open(report_path, "w") as f:
+        f.write(json.dumps(report) + "\n")
     logger.info("Drift report saved to %s", report_path)
 
 
@@ -152,13 +187,8 @@ def run_drift_detection(config: dict) -> dict:
     live_df = load_live_window(config)
 
     logger.info("Running KS test on %d features...", len(live_df.columns))
-    report = run_ks_test(train_df, live_df, config["drift"]["p_value_threshold"])
+    report = run_ks_test(train_df, live_df, config)
 
     save_drift_report(report, config)
-
-    if report["drift_detected"]:
-        logger.warning("DRIFT DETECTED — retraining should be triggered")
-    else:
-        logger.info("No drift detected — model is healthy")
 
     return report
