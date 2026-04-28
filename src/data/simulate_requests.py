@@ -18,6 +18,7 @@ API_URL = "http://localhost:8000/predict"
 def simulate(config: dict) -> None:
     """
     Sends each row of 2012 live data as a POST request to the prediction API.
+    Stops after total_requests rows if configured.
 
     Args:
         config: Full project config dict
@@ -31,7 +32,18 @@ def simulate(config: dict) -> None:
     feature_cols = [col for col in live_df.columns if col not in drop_cols]
     live_df = live_df[feature_cols]
 
-    logger.info("Starting simulation with %d rows", len(live_df))
+    # cap rows to total_requests if set — prevents simulation running indefinitely
+    total_requests = config["simulation"].get("total_requests")
+    if total_requests:
+        live_df = live_df.head(total_requests)
+
+    logger.info(
+        "Starting simulation — %d rows at %d req/s",
+        len(live_df),
+        config["simulation"]["requests_per_second"]
+    )
+
+    sent = 0
 
     for i, row in live_df.iterrows():
         payload = row.to_dict()
@@ -39,22 +51,25 @@ def simulate(config: dict) -> None:
         try:
             response = requests.post(API_URL, json=payload)
             response.raise_for_status()
+            sent += 1
 
-            if i % 100 == 0:
-                logger.info("Sent %d requests — latest prediction: %s", i, response.json())
+            if sent % 50 == 0:
+                logger.info(
+                    "Sent %d / %d requests — latest prediction: %s",
+                    sent, len(live_df), response.json()
+                )
 
         except requests.exceptions.ConnectionError:
-            logger.error("API not running. Start it with: uvicorn app:app --reload")
+            logger.error("API not reachable at %s — is it running?", API_URL)
             break
 
         except Exception as e:
             logger.error("Request failed at row %d: %s", i, str(e))
             continue
 
-        # control speed from config
         time.sleep(1 / config["simulation"]["requests_per_second"])
 
-    logger.info("Simulation complete")
+    logger.info("Simulation complete — %d requests sent", sent)
 
 
 if __name__ == "__main__":
