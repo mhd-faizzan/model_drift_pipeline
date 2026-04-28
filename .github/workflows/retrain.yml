@@ -2,21 +2,25 @@ name: Drift Detection and Retraining
 
 on:
   schedule:
-    # runs every day at midnight UTC
     - cron: "0 0 * * *"
   workflow_dispatch:
-    # allows manual trigger from GitHub UI
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   detect-and-retrain:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.4.0
         with:
           python-version: "3.11"
 
@@ -56,58 +60,90 @@ jobs:
               config = yaml.safe_load(f)
 
           report = run_drift_detection(config)
-
           print(json.dumps(report, indent=2))
 
-          # write drift flag to github output
-          with open('drift_report.json', 'w') as f:
-              json.dump(report, f)
+          import os
+          os.makedirs('logs', exist_ok=True)
 
-          if report['drift_detected']:
-              print('DRIFT=true')
-          else:
-              print('DRIFT=false')
-          " | tee /dev/stderr | grep "DRIFT=" >> $GITHUB_OUTPUT
+          with open('logs/drift_report.jsonl', 'a') as f:
+              f.write(json.dumps(report) + '\n')
+
+          drift_flag = 'true' if report['drift_detected'] else 'false'
+          print(f'DRIFT={drift_flag}')
+          " 2>&1 | tee drift_output.txt
+          grep "DRIFT=" drift_output.txt >> $GITHUB_OUTPUT
 
       - name: Retrain model on latest data
-        if: contains(steps.drift.outputs.DRIFT, 'true')
+        if: steps.drift.outputs.DRIFT == 'true'
         run: python main.py
 
       - name: Compare new model vs champion
-        if: contains(steps.drift.outputs.DRIFT, 'true')
+        if: steps.drift.outputs.DRIFT == 'true'
         id: compare
         run: |
           python -c "
           import json
+          import os
+
+          os.makedirs('models', exist_ok=True)
 
           with open('models/metrics.json') as f:
               new_metrics = json.load(f)
 
           print(f'New model RMSE: {new_metrics[\"rmse\"]}')
-
-          # write result to github output
-          with open('new_metrics.json', 'w') as f:
-              json.dump(new_metrics, f)
-
           print('PROMOTE=true')
-          " | tee /dev/stderr | grep "PROMOTE=" >> $GITHUB_OUTPUT
+          " 2>&1 | tee compare_output.txt
+          grep "PROMOTE=" compare_output.txt >> $GITHUB_OUTPUT
+
+      - name: Build PR body with actual metrics
+        if: steps.compare.outputs.PROMOTE == 'true'
+        id: pr_body
+        run: |
+          python -c "
+          import json
+
+          with open('models/metrics.json') as f:
+              metrics = json.load(f)
+
+          with open('logs/drift_report.jsonl') as f:
+              lines = f.readlines()
+              last = json.loads(lines[-1])
+
+          drifted = last.get('drifted_features', [])
+          drifted_list = '\n'.join(f'- {feat}' for feat in drifted) if drifted else '- none listed'
+
+          body = f'''## Drift Detection Report
+
+          Drift was detected in the incoming feature distributions.
+          Model has been retrained on the latest data window.
+
+          ### New Model Metrics
+          | Metric | Value |
+          |--------|-------|
+          | RMSE   | {metrics.get('rmse', 'n/a')} |
+          | MAE    | {metrics.get('mae', 'n/a')} |
+          | R2     | {metrics.get('r2', 'n/a')} |
+
+          ### Drifted Features
+          {drifted_list}
+
+          Full details in \`models/metrics.json\` and \`logs/drift_report.jsonl\`.
+          '''
+
+          with open('pr_body.md', 'w') as f:
+              f.write(body)
+          "
 
       - name: Open PR with metrics report
-        if: contains(steps.compare.outputs.PROMOTE, 'true')
-        uses: peter-evans/create-pull-request@v6
+        if: steps.compare.outputs.PROMOTE == 'true'
+        uses: peter-evans/create-pull-request@v7.0.8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore: retrained model after drift detected"
+          commit-message: "chore: retrained model after drift detected [skip ci]"
           title: "Model Retrain — Drift Detected"
-          body: |
-            ## Drift Detection Report
-
-            Drift was detected in the incoming feature distributions.
-            Model has been retrained on the latest data window.
-
-            ### New Model Metrics
-            See `models/metrics.json` for full details.
-
-            ### Drifted Features
-            Check `logs/drift_report.jsonl` for per-feature KS test results.
+          body-path: pr_body.md
           branch: retrain/auto-retrain
+          add-paths: |
+            models/metrics.json
+            logs/drift_report.jsonl
+          delete-branch: true
