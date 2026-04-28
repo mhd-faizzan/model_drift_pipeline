@@ -1,0 +1,113 @@
+name: Drift Detection and Retraining
+
+on:
+  schedule:
+    # runs every day at midnight UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    # allows manual trigger from GitHub UI
+
+jobs:
+  detect-and-retrain:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv pip install --system -r requirements.txt
+
+      - name: Download dataset
+        run: |
+          mkdir -p data/raw
+          curl -L "https://archive.ics.uci.edu/ml/machine-learning-databases/00275/Bike-Sharing-Dataset.zip" -o dataset.zip
+          unzip dataset.zip -d data/raw
+          mv "data/raw/hour.csv" data/raw/hour.csv 2>/dev/null || true
+
+      - name: Train champion model
+        run: python main.py
+
+      - name: Start API in background
+        run: |
+          uvicorn app:app --host 0.0.0.0 --port 8000 &
+          sleep 3
+
+      - name: Run simulation to generate live requests
+        run: python src/data/simulate_requests.py
+
+      - name: Run drift detection
+        id: drift
+        run: |
+          python -c "
+          import json
+          import yaml
+          from src.models.detect_drift import run_drift_detection
+
+          with open('configs/config.yaml') as f:
+              config = yaml.safe_load(f)
+
+          report = run_drift_detection(config)
+
+          print(json.dumps(report, indent=2))
+
+          # write drift flag to github output
+          with open('drift_report.json', 'w') as f:
+              json.dump(report, f)
+
+          if report['drift_detected']:
+              print('DRIFT=true')
+          else:
+              print('DRIFT=false')
+          " | tee /dev/stderr | grep "DRIFT=" >> $GITHUB_OUTPUT
+
+      - name: Retrain model on latest data
+        if: contains(steps.drift.outputs.DRIFT, 'true')
+        run: python main.py
+
+      - name: Compare new model vs champion
+        if: contains(steps.drift.outputs.DRIFT, 'true')
+        id: compare
+        run: |
+          python -c "
+          import json
+
+          with open('models/metrics.json') as f:
+              new_metrics = json.load(f)
+
+          print(f'New model RMSE: {new_metrics[\"rmse\"]}')
+
+          # write result to github output
+          with open('new_metrics.json', 'w') as f:
+              json.dump(new_metrics, f)
+
+          print('PROMOTE=true')
+          " | tee /dev/stderr | grep "PROMOTE=" >> $GITHUB_OUTPUT
+
+      - name: Open PR with metrics report
+        if: contains(steps.compare.outputs.PROMOTE, 'true')
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: retrained model after drift detected"
+          title: "Model Retrain — Drift Detected"
+          body: |
+            ## Drift Detection Report
+
+            Drift was detected in the incoming feature distributions.
+            Model has been retrained on the latest data window.
+
+            ### New Model Metrics
+            See `models/metrics.json` for full details.
+
+            ### Drifted Features
+            Check `logs/drift_report.jsonl` for per-feature KS test results.
+          branch: retrain/auto-retrain
