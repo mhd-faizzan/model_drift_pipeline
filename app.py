@@ -5,7 +5,7 @@ import pickle
 
 import pandas as pd
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 logging.basicConfig(
@@ -20,8 +20,17 @@ app = FastAPI()
 with open("configs/config.yaml") as f:
     config = yaml.safe_load(f)
 
-with open(config["model"]["save_path"], "rb") as f:
+model_path = config["model"]["save_path"]
+
+if not os.path.exists(model_path):
+    raise RuntimeError(
+        f"Model not found at {model_path}. Run main.py to train first."
+    )
+
+with open(model_path, "rb") as f:
     model = pickle.load(f)
+
+logger.info("Model loaded from %s", model_path)
 
 os.makedirs("logs", exist_ok=True)
 
@@ -50,7 +59,7 @@ def predict(request: PredictionRequest) -> dict:
     features = pd.DataFrame([request.model_dump()])
     prediction = model.predict(features)[0]
 
-    # log incoming features for drift detection
+    # log incoming features and prediction for drift detection
     log_entry = request.model_dump()
     log_entry["prediction"] = float(prediction)
 
@@ -64,12 +73,36 @@ def predict(request: PredictionRequest) -> dict:
 
 @app.get("/drift-report")
 def drift_report() -> dict:
+    """
+    Returns latest drift report if available, otherwise returns
+    total requests logged so far.
+    """
+    report_path = config["drift"]["report_path"]
     log_path = config["drift"]["log_path"]
 
+    # return latest drift report if it exists
+    if os.path.exists(report_path):
+        with open(report_path) as f:
+            lines = f.readlines()
+        if lines:
+            latest = json.loads(lines[-1])
+            total_logged = 0
+            if os.path.exists(log_path):
+                with open(log_path) as f:
+                    total_logged = sum(1 for _ in f)
+            return {
+                "total_requests_logged": total_logged,
+                "latest_drift_report": latest,
+            }
+
+    # drift detection has not run yet — return request count only
     if not os.path.exists(log_path):
         return {"message": "No requests logged yet"}
 
     with open(log_path) as f:
-        lines = f.readlines()
+        total_logged = sum(1 for _ in f)
 
-    return {"total_requests_logged": len(lines)}
+    return {
+        "total_requests_logged": total_logged,
+        "latest_drift_report": None,
+    }
