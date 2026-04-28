@@ -9,14 +9,13 @@ dist/
 wheels/
 *.egg-info
 
-# data and models 
+# data and models
 data/raw/
 data/processed/
 models/*.pkl
-models/*.json
 
-# logs
-logs/
+# logs and experiment tracking
+logs/drift_log.jsonl
 
 # jupyter
 .ipynb_checkpoints/
