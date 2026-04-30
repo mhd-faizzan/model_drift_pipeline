@@ -23,6 +23,15 @@ jobs:
         uses: actions/setup-python@v5.4.0
         with:
           python-version: "3.11"
+          cache: "pip"
+
+      - name: Cache uv packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: ${{ runner.os }}-uv-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-uv-
 
       - name: Install uv
         run: pip install uv
@@ -43,7 +52,7 @@ jobs:
       - name: Start API in background
         run: |
           uvicorn app:app --host 0.0.0.0 --port 8000 &
-          sleep 3
+          timeout 30 bash -c 'until curl -sf http://localhost:8000/health; do sleep 1; done'
 
       - name: Run simulation to generate live requests
         run: python src/data/simulate_requests.py
@@ -62,12 +71,6 @@ jobs:
           report = run_drift_detection(config)
           print(json.dumps(report, indent=2))
 
-          import os
-          os.makedirs('logs', exist_ok=True)
-
-          with open('logs/drift_report.jsonl', 'a') as f:
-              f.write(json.dumps(report) + '\n')
-
           drift_flag = 'true' if report['drift_detected'] else 'false'
           print(f'DRIFT={drift_flag}')
           " 2>&1 | tee drift_output.txt
@@ -85,10 +88,16 @@ jobs:
           import json
           import os
 
-          os.makedirs('models', exist_ok=True)
-
           with open('models/metrics.json') as f:
               new_metrics = json.load(f)
+
+          champion_path = 'models/champion_metrics.json'
+          if os.path.exists(champion_path):
+              with open(champion_path) as f:
+                  champion_metrics = json.load(f)
+              print(f'Champion RMSE: {champion_metrics[\"rmse\"]}')
+          else:
+              print('No champion metrics found — first run')
 
           print(f'New model RMSE: {new_metrics[\"rmse\"]}')
           print('PROMOTE=true')
@@ -97,32 +106,38 @@ jobs:
 
       - name: Build PR body with actual metrics
         if: steps.compare.outputs.PROMOTE == 'true'
-        id: pr_body
         run: |
           python -c "
           import json
+          import os
 
           with open('models/metrics.json') as f:
               metrics = json.load(f)
 
+          champion_path = 'models/champion_metrics.json'
+          if os.path.exists(champion_path):
+              with open(champion_path) as f:
+                  champion = json.load(f)
+          else:
+              champion = metrics
+
           with open('logs/drift_report.jsonl') as f:
-              lines = f.readlines()
-              last = json.loads(lines[-1])
+              last = json.loads(f.readlines()[-1])
 
           drifted = last.get('drifted_features', [])
-          drifted_list = '\n'.join(f'- {feat}' for feat in drifted) if drifted else '- none listed'
+          drifted_list = '\n'.join(f'- {feat}' for feat in drifted) if drifted else '- none'
 
           body = f'''## Drift Detection Report
 
           Drift was detected in the incoming feature distributions.
           Model has been retrained on the latest data window.
 
-          ### New Model Metrics
-          | Metric | Value |
-          |--------|-------|
-          | RMSE   | {metrics.get('rmse', 'n/a')} |
-          | MAE    | {metrics.get('mae', 'n/a')} |
-          | R2     | {metrics.get('r2', 'n/a')} |
+          ### Model Metrics
+          | Metric | Champion | New |
+          |--------|----------|-----|
+          | RMSE   | {champion.get('rmse', 'n/a')} | {metrics.get('rmse', 'n/a')} |
+          | MAE    | {champion.get('mae', 'n/a')} | {metrics.get('mae', 'n/a')} |
+          | R2     | {champion.get('r2', 'n/a')} | {metrics.get('r2', 'n/a')} |
 
           ### Drifted Features
           {drifted_list}
@@ -145,5 +160,6 @@ jobs:
           branch: retrain/auto-retrain
           add-paths: |
             models/metrics.json
+            models/champion_metrics.json
             logs/drift_report.jsonl
           delete-branch: true
